@@ -178,6 +178,10 @@ export class DefaultTerminalState extends CommandTerminalState {
       executor: this.info.bind(this),
       description: 'shows info of the current device'
     },
+    'autohack': {
+      executor: this.autohack.bind(this),
+      description: 'automatically hacks other devices'
+    },
 
     // easter egg
     'chaozz': {
@@ -191,8 +195,8 @@ export class DefaultTerminalState extends CommandTerminalState {
   working_dir: string = Path.ROOT;  // UUID of the working directory
 
   constructor(protected websocket: WebsocketService, private settings: SettingsService, private fileService: FileService,
-              private domSanitizer: DomSanitizer, protected windowDelegate: WindowDelegate, protected activeDevice: Device,
-              protected terminal: TerminalAPI, public promptColor: string = null) {
+    private domSanitizer: DomSanitizer, protected windowDelegate: WindowDelegate, protected activeDevice: Device,
+    protected terminal: TerminalAPI, public promptColor: string = null) {
     super();
     this.settings.terminalPromptColor.getFresh().then(() => this.refreshPrompt());
   }
@@ -840,25 +844,25 @@ export class DefaultTerminalState extends CommandTerminalState {
           }, error => {
             if (error.message === 'file_not_found') {
               if (path.path[path.path.length - 1].length < 65) {
-              this.websocket.ms('currency', ['create'], {}).subscribe(wallet => {
-                const credentials = wallet.source_uuid + ' ' + wallet.key;
+                this.websocket.ms('currency', ['create'], {}).subscribe(wallet => {
+                  const credentials = wallet.source_uuid + ' ' + wallet.key;
 
-                this.fileService.createFile(this.activeDevice['uuid'], path.path[path.path.length - 1], credentials, this.working_dir)
-                  .subscribe({
-                    error: err => {
-                      this.terminal.outputText('That file couldn\'t be created. Please note your wallet credentials ' +
-                        'and put them in a new file with \'touch\' or contact the support: \'' + credentials + '\'');
-                      reportError(err);
-                    }
-                  });
-              }, error1 => {
-                if (error1.message === 'already_own_a_wallet') {
-                  this.terminal.outputText('You already own a wallet');
-                } else {
-                  this.terminal.outputText(error1.message);
-                  reportError(error1);
-                }
-              });
+                  this.fileService.createFile(this.activeDevice['uuid'], path.path[path.path.length - 1], credentials, this.working_dir)
+                    .subscribe({
+                      error: err => {
+                        this.terminal.outputText('That file couldn\'t be created. Please note your wallet credentials ' +
+                          'and put them in a new file with \'touch\' or contact the support: \'' + credentials + '\'');
+                        reportError(err);
+                      }
+                    });
+                }, error1 => {
+                  if (error1.message === 'already_own_a_wallet') {
+                    this.terminal.outputText('You already own a wallet');
+                  } else {
+                    this.terminal.outputText(error1.message);
+                    reportError(error1);
+                  }
+                });
               } else {
                 this.terminal.outputText('Filename too long. Only 64 chars allowed');
               }
@@ -1086,9 +1090,9 @@ export class DefaultTerminalState extends CommandTerminalState {
               startAttack();
             }
           }, (err) => {
-              if (err.message === 'service_not_running') {
-                this.terminal.outputText('Target service is unreachable.');
-              }
+            if (err.message === 'service_not_running') {
+              this.terminal.outputText('Target service is unreachable.');
+            }
           });
         }, error => {
           if (error.message === 'attack_not_running') {
@@ -1179,8 +1183,102 @@ export class DefaultTerminalState extends CommandTerminalState {
     });
   }
 
+  autohack() {
+    this.websocket.ms('device', ['device', 'spot'], {}).subscribe(random_device => {
+      this.websocket.ms('service', ['list'], { 'device_uuid': this.activeDevice['uuid'] }).subscribe(localServices => {
+        const portScanner = (localServices['services'] || []).filter(service => service.name === 'portscan')[0];
+        if (portScanner == null || portScanner['uuid'] == null) {
+          this.service(['create', 'portscan']);
+        }
+
+        const activeDevice = this.activeDevice['uuid'];
+
+        const getServices = (): any => {
+          this.websocket.ms('service', ['list'], { device_uuid: activeDevice }).pipe(map(data => {
+            return data['services'];
+          }), catchError(error => {
+            reportError(error);
+            return [];
+          }));
+        }
+
+        const getService = name => getServices().pipe(map(services => {
+          return (services as any[]).find(service => service['name'] === name);
+        }));
+
+        this.websocket.ms('service', ['use'], {
+          'device_uuid': this.activeDevice['uuid'],
+          'service_uuid': portScanner['uuid'], 'target_device': random_device['uuid']
+        }).subscribe(remoteServices => {
+          this.terminal.outputText('\'' + escapeHtml(random_device['name']) + '\':');
+          const bruteforcer = (localServices['services'] || []).filter(service => service.name === 'bruteforce')[0];
+          if (bruteforcer == null || bruteforcer['uuid'] == null) {
+            this.service(['create', 'bruteforce']);
+          }
+          const targetDevice = random_device['uuid'];
+          const targetService = remoteServices['services'][0]['uuid'];
+
+          const startAttack = () => {
+            this.websocket.ms('service', ['bruteforce', 'attack'], {
+              service_uuid: targetDevice, device_uuid: activeDevice,
+              target_device: targetDevice, target_service: targetService
+            }).subscribe(() => {
+              this.terminal.outputText('You started a bruteforce attack');
+              this.terminal.pushState(new BruteforceTerminalState(this.terminal, this.domSanitizer, stop => {
+                if (stop) {
+                  this.executeCommand('service', ['bruteforce', targetDevice, targetService]);
+                }
+              }));
+            }, error1 => {
+              if (error1.message === 'could_not_start_service') {
+                this.terminal.outputText('There was an error while starting the bruteforce attack');
+              } else if (error1.message === 'invalid_input_data') {
+                this.terminal.outputText('The specified UUID is not valid');
+              } else {
+                reportError(error1);
+              }
+            });
+          };
+
+          this.service(['bruteforce', targetDevice, targetService]);
+          setTimeout(() => {
+            getService('bruteforce').subscribe(bruteforceService => {
+              this.websocket.ms('service', ['bruteforce', 'stop'], {
+                service_uuid: bruteforceService['uuid'], device_uuid: activeDevice
+              }).subscribe(stopData => {
+                if (stopData['access'] === true) {
+                  this.terminal.outputText('Access granted - use `connect <device>`');
+                } else {
+                  this.terminal.outputText('Access denied. The bruteforce attack was not successful');
+                }
+                startAttack();
+              }, (err) => {
+                if (err.message === 'service_not_running') {
+                  this.terminal.outputText('Target service is unreachable.');
+                }
+              });
+            }, 1000);
+            const list = document.createElement('ul');
+            list.innerHTML = '<li>UUID: ' + DefaultTerminalState.promptAppender(random_device['uuid']) + '</li>' +
+              '<li>Services:</li>' +
+              '<ul>' +
+              remoteServices['services']
+                .map(service => '<li>' + escapeHtml(service['name']) + ' (' + DefaultTerminalState.promptAppender(service['uuid']) + ')</li>')
+                .join('\n') +
+              '</ul>';
+            this.terminal.outputNode(list);
+            DefaultTerminalState.registerPromptAppenders(list);
+          }, error => {
+            this.terminal.output('<span class="errorText">An error occurred</span>');
+            reportError(error);
+            return;
+          });
+        });
+      });
+    }
+
   connect(args: string[]) {
-    if (args.length !== 1) {
+      if(args.length !== 1) {
       this.terminal.outputText('usage: connect <device>');
       return;
     }
@@ -1639,9 +1737,9 @@ export class BruteforceTerminalState extends ChoiceTerminalState {
   };
 
   constructor(terminal: TerminalAPI,
-              private domSanitizer: DomSanitizer,
-              private callback: (response: boolean) => void,
-              private startSeconds: number = 0) {
+    private domSanitizer: DomSanitizer,
+    private callback: (response: boolean) => void,
+    private startSeconds: number = 0) {
     super(terminal);
 
     this.intervalHandle = setInterval(() => {
